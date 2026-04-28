@@ -5,15 +5,18 @@ import time
 from datetime import datetime, timedelta
 from scipy import stats
 from tqdm import tqdm
-def check_for_existance(ticker):
+def get_tickers():
     url = f'https://iss.moex.com/iss/engines/stock/markets/shares/securities.json'
     params = {
-        "iss.only" : "securuties",
+        "iss.only" : "securities",
         "securities.columns" : "SECID"
     }
     resp = re.get(url, params=params)
     resp = resp.json()['securities']
     r = [k[0] for k in resp["data"]]
+    return r
+
+def check_for_existance(ticker, r):
     if ticker in r:
         ans = 1
     else:
@@ -94,7 +97,7 @@ def delta_normal_VaR(data):
         return q * np.sqrt(days) * sigma
 
     flow = flow_creator(data)
-    print(f'p_value Шапиро-Уилка: {stats.shapiro(np.array(flow['ln_change'])).pvalue}')
+    print(f'\np_value Шапиро-Уилка: {stats.shapiro(np.array(flow['ln_change'])).pvalue}')
     sigma = flow['ln_change'].std()
     ans = {
         "VaR_95_1" : float(calc_VaR_dn(sigma, 0.05, 1)),
@@ -113,7 +116,7 @@ def monte_carlo_VaR(data):
     scenarios = np.sort(stats.norm.rvs(loc = 0, scale = 1, size = 10000))
     prices_after_1_day = []
     prices_after_10_days = []
-    for i in tqdm(scenarios, desc="Расчет сценариев"):
+    for i in scenarios:
         prices_after_1_day.append(np.exp((mu - (sigma ** 2) / 2) + sigma * i))
         prices_after_10_days.append(np.exp((mu - (sigma ** 2) / 2) * 10 + sigma* np.sqrt(10) * i))
     ans = {
@@ -148,13 +151,15 @@ def beau_printer(ans, name):
 
 def VaRcalc():
     ticker, n_days = get_ticker_and_days()
-    z = check_for_existance(ticker)
+    r = get_tickers()
+    z = check_for_existance(ticker, r)
     if z == 1:
         ticker_data = return_response_moex(ticker, n_days)
         hist_var = historical_VaR(ticker_data)
         delta_norm = delta_normal_VaR(ticker_data)
         monte_calro = monte_carlo_VaR(ticker_data)
         print()
+        print(ticker)
         beau_printer(*hist_var)
         beau_printer(*delta_norm)
         beau_printer(*monte_calro)
@@ -162,4 +167,37 @@ def VaRcalc():
         print("Тикер отсутствует на бирже")
     return 0
 
-VaRcalc()
+
+def multiple_VaRcalc():
+    ts = []
+    z = 0
+    x = int(input("Кол-во тикеров\n\r"))
+    n_days = 501
+    r = get_tickers()
+    for i in range(x):
+        temp = str(input(f"Введите тикер номер {i+1}\n\r")).upper()
+        ts.append(temp)
+        z += check_for_existance(temp, r)
+    print("\n\n")
+    if z == x:
+        for ticker in tqdm(ts, desc="Расчет всех сценариев"):
+            ticker_data = return_response_moex(ticker, n_days)
+            hist_var = historical_VaR(ticker_data)
+            delta_norm = delta_normal_VaR(ticker_data)
+            monte_calro = monte_carlo_VaR(ticker_data)
+            print(ticker)
+            beau_printer(*hist_var)
+            beau_printer(*delta_norm)
+            beau_printer(*monte_calro)
+            print("\n\n")
+    else:
+        print("Тикер отсутствует на бирже")
+    return 0
+
+opt = int(input("Введите 1 для VaR одной акции\nВведите 2 для VaR списка акций\n\r"))
+if opt == 1:
+    VaRcalc()
+elif opt == 2:
+    multiple_VaRcalc()
+else:
+    print("Некорректный ввод")
