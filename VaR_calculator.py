@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import requests as re
 import time
+import matplotlib.pyplot as plt
+from arch import arch_model
 from datetime import datetime, timedelta
 from scipy import stats
 from tqdm import tqdm
@@ -15,6 +17,7 @@ def get_tickers():
     resp = resp.json()['securities']
     r = [k[0] for k in resp["data"]]
     return r
+
 
 def check_for_existance(ticker, r):
     if ticker in r:
@@ -82,6 +85,7 @@ def historical_VaR(data):
         return series['ln_change'].iloc[picked_value_i] * np.sqrt(days)
 
     flow = flow_creator(data)
+    flow = flow.sort_values(by='ln_change')
     ans = { 
         "VaR_95_1" : float(calc_VaR(flow, 0.05, 1)),
         "VaR_95_10" : float(calc_VaR(flow, 0.05, 10)),
@@ -97,6 +101,7 @@ def delta_normal_VaR(data):
         return q * np.sqrt(days) * sigma
 
     flow = flow_creator(data)
+    flow = flow.sort_values(by='ln_change')
     print(f'\np_value Шапиро-Уилка: {stats.shapiro(np.array(flow['ln_change'])).pvalue}')
     sigma = flow['ln_change'].std()
     ans = {
@@ -110,6 +115,7 @@ def delta_normal_VaR(data):
 
 def monte_carlo_VaR(data):
     flow = flow_creator(data)
+    flow = flow.sort_values(by='ln_change')
     mu = flow['ln_change'].mean()
     sigma = flow['ln_change'].std()
 
@@ -129,11 +135,48 @@ def monte_carlo_VaR(data):
     return (ans, "Подход Монте-Карло")
 
 
+def monte_carlo_garch_VaR(data):
+    flow = flow_creator(data)
+    mu = flow['ln_change'].mean()
+    a_model = arch_model(flow['ln_change'].values * 100, vol='Garch', p = 1, q = 1, dist='normal', rescale=False)
+    res = a_model.fit(disp='off', options={'ftol' : 1e-8, 'maxiter' : 500})
+    om = res.params['omega'] / 10000
+    alpha = res.params['alpha[1]']
+    beta = res.params['beta[1]']
+    sigma_starting = (res.conditional_volatility[-1] / 100)** 2
+    n_sims = 10000
+    max_d = 10
+    r_cumulative_1 = np.zeros(n_sims)
+    r_cumulative_10 = np.zeros(n_sims)
+    for i in range(n_sims):
+        sigma2 = sigma_starting
+        r_cumulative = 0.0
+        for j in range(1, 11):
+            z = np.random.normal()
+            sigma = np.sqrt(sigma2)
+            r_day = mu + sigma * z
+            r_cumulative += r_day
+            if j == 1:
+                r_cumulative_1[i] = r_cumulative
+            if j == 10:
+                r_cumulative_10[i] = r_cumulative
+            sigma2 = om + alpha * (r_day ** 2) + beta * sigma2
+    loss_1 = 1 - np.exp(r_cumulative_1)
+    loss_10 = 1 - np.exp(r_cumulative_10)
+    ans = {
+        "VaR_95_1"  : float(np.percentile(loss_1, 5)),
+        "VaR_95_10" : float(np.percentile(loss_10, 5)),
+        "VaR_99_1" : float(np.percentile(loss_1, 1)),
+        "VaR_99_10" : float(np.percentile(loss_10, 1))
+    }
+    return (ans, "Подход Монте-Карло GARCH")
+
+
 def flow_creator(data):
     flow = data[['TRADEDATE', 'CLOSE_ADJ']]
     flow['ln_change'] = np.log(flow['CLOSE_ADJ']/ flow['CLOSE_ADJ'].shift(1))
     flow = flow.dropna()
-    flow = flow.sort_values(by='ln_change')
+    flow = flow.sort_values(by='TRADEDATE')
     return flow
 
 
@@ -149,6 +192,20 @@ def beau_printer(ans, name):
     return 0
 
 
+def plotter(data, ticker):
+    flow = flow_creator(data)
+    r_s = flow['ln_change'].values
+    mu = r_s.mean()
+    sigma = r_s.std()
+    norm_rasp = np.linspace(r_s.min(), r_s.max(), 100)
+    plt.figure(figsize=(8, 6))
+    plt.hist(r_s, bins=50, density=True, label='Логдоходности', alpha=0.5)
+    plt.plot(norm_rasp, stats.norm.pdf(norm_rasp, r_s.mean(), r_s.std()), label='Нормальное распределение')
+    plt.legend()
+    plt.title(ticker)
+    plt.show()
+
+
 def VaRcalc():
     ticker, n_days = get_ticker_and_days()
     r = get_tickers()
@@ -158,11 +215,14 @@ def VaRcalc():
         hist_var = historical_VaR(ticker_data)
         delta_norm = delta_normal_VaR(ticker_data)
         monte_calro = monte_carlo_VaR(ticker_data)
+        monte_carlo_garch = monte_carlo_garch_VaR(ticker_data)
         print()
         print(ticker)
         beau_printer(*hist_var)
         beau_printer(*delta_norm)
         beau_printer(*monte_calro)
+        beau_printer(*monte_carlo_garch)
+        plotter(ticker_data, ticker)
     else:
         print("Тикер отсутствует на бирже")
     return 0
@@ -177,7 +237,12 @@ def multiple_VaRcalc():
     for i in range(x):
         temp = str(input(f"Введите тикер номер {i+1}\n\r")).upper()
         ts.append(temp)
-        z += check_for_existance(temp, r)
+        checker = check_for_existance(temp, r)
+        if checker == 0:
+            print("Тикер отсутствует на бирже")
+            break
+        else:
+            z += checker
     print("\n\n")
     if z == x:
         for ticker in tqdm(ts, desc="Расчет всех сценариев"):
@@ -185,14 +250,15 @@ def multiple_VaRcalc():
             hist_var = historical_VaR(ticker_data)
             delta_norm = delta_normal_VaR(ticker_data)
             monte_calro = monte_carlo_VaR(ticker_data)
+            monte_carlo_garch = monte_carlo_garch_VaR(ticker_data)
             print(ticker)
             beau_printer(*hist_var)
             beau_printer(*delta_norm)
             beau_printer(*monte_calro)
+            beau_printer(*monte_carlo_garch)
             print("\n\n")
-    else:
-        print("Тикер отсутствует на бирже")
     return 0
+
 
 opt = int(input("Введите 1 для VaR одной акции\nВведите 2 для VaR списка акций\n\r"))
 if opt == 1:
